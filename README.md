@@ -8,7 +8,7 @@ The agent is still external. Claude, Codex, whatever you want. This repo is the 
 
 Two workers talk to iii-engine:
 
-    Orchestrator (TypeScript) — 21 functions for experiment tracking, search strategy, GPU pool, reporting
+    Orchestrator (Python or TypeScript) — 21 functions for experiment tracking, search strategy, GPU pool, reporting
     GPU Worker (Rust) — one per GPU, executes uv run train.py, parses metrics, handles timeouts
 
 The external agent calls the same uv run train.py but wraps it with REST API calls:
@@ -34,10 +34,14 @@ Requirements: NVIDIA GPU(s), Python 3.10+, uv, Node.js 20+, Rust 1.82+.
     # 3. Start iii-engine
     iii --config iii-config.yaml
 
-    # 4. Start orchestrator (new terminal)
-    cd workers/orchestrator
-    npm install
-    npx tsx src/index.ts
+    # 4. Start orchestrator (new terminal) — pick Python or TypeScript
+
+    # Python (recommended for ML workflows):
+    uv sync
+    python workers/orchestrator-py/orchestrator.py
+
+    # TypeScript (alternative):
+    cd workers/orchestrator && npm install && npx tsx src/index.ts
 
     # 5. Start GPU worker (new terminal, one per GPU)
     cd workers/gpu
