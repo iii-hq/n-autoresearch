@@ -8,7 +8,7 @@ The agent is still external. Claude, Codex, whatever you want. This repo is the 
 
 Two workers talk to iii-engine:
 
-    Orchestrator (TypeScript) — 21 functions for experiment tracking, search strategy, GPU pool, reporting
+    Orchestrator (Python) — 21 functions for experiment tracking, search strategy, GPU pool, reporting
     GPU Worker (Rust) — one per GPU, executes uv run train.py, parses metrics, handles timeouts
 
 The external agent calls the same uv run train.py but wraps it with REST API calls:
@@ -22,7 +22,7 @@ Everything else stays the same. train.py is the only file agents modify. prepare
 
 ## Quick start
 
-Requirements: NVIDIA GPU(s), Python 3.10+, uv, Node.js 20+, Rust 1.82+.
+Requirements: NVIDIA GPU(s), Python 3.10+, uv, Rust 1.82+.
 
     # 1. Install iii-engine
     curl -fsSL https://install.iii.dev | sh
@@ -31,26 +31,26 @@ Requirements: NVIDIA GPU(s), Python 3.10+, uv, Node.js 20+, Rust 1.82+.
     git clone https://github.com/iii-hq/n-autoresearch.git
     cd n-autoresearch
 
-    # 3. Start iii-engine
+    # 3. Install Python dependencies
+    uv sync
+
+    # 4. Start iii-engine
     iii --config iii-config.yaml
 
-    # 4. Start orchestrator (new terminal)
-    cd workers/orchestrator
-    npm install
-    npx tsx src/index.ts
+    # 5. Start orchestrator (new terminal)
+    python workers/orchestrator/orchestrator.py
 
-    # 5. Start GPU worker (new terminal, one per GPU)
+    # 6. Start GPU worker (new terminal, one per GPU)
     cd workers/gpu
     GPU_INDEX=0 REPO_DIR=/path/to/n-autoresearch cargo run --release
 
     # For multiple GPUs:
     GPU_INDEX=1 REPO_DIR=/path/to/n-autoresearch cargo run --release
 
-    # 6. Download data and train tokenizer (one-time)
-    uv sync
+    # 7. Download data and train tokenizer (one-time)
     uv run prepare.py
 
-    # 7. Point your agent at program.md and go
+    # 8. Point your agent at program.md and go
     # e.g. in Claude Code: "read program.md and kick off a new experiment"
 
 ## What the agent does
@@ -151,19 +151,8 @@ N GPU workers = N parallel experiments on the same tag. Each agent acquires a GP
     prepare.py                              data prep + eval (read-only)
     train.py                                model + optimizer + loop (agent modifies)
     workers/
-      orchestrator/                         TypeScript worker
-        src/
-          index.ts                          main entry, register all
-          config.ts                         env-based config
-          state/kv.ts                       KV wrapper
-          state/schema.ts                   8 scopes, all types
-          functions/experiment.ts            7 functions
-          functions/search.ts               4 functions
-          functions/pool.ts                 6 functions
-          functions/report.ts               4 functions
-          triggers/api.ts                   20 HTTP endpoints
-          triggers/events.ts                2 event triggers
-          triggers/cron.ts                  1 cron trigger
+      orchestrator/
+        orchestrator.py                     Python worker — 21 functions, 23 triggers
       gpu/                                  Rust worker (one per GPU)
         src/
           main.rs                           init, GPU detection, pool registration
