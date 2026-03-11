@@ -5,7 +5,7 @@
   "description": "Autonomous ML research infrastructure on iii-engine",
   "license": "Apache-2.0",
   "scripts": {
-    "dev:orchestrator": "python workers/orchestrator/orchestrator.py",
+    "dev:orchestrator": "uv run python workers/orchestrator/orchestrator.py",
     "dev:gpu": "cd workers/gpu && cargo run --release",
     "prepare:data": "uv run prepare.py",
     "train": "uv run train.py"

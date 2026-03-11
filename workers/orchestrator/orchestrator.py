@@ -3,7 +3,9 @@ import time
 import asyncio
 import signal
 from datetime import datetime, timezone
-from iii import register_worker, InitOptions, OtelConfig
+from iii import register_worker, InitOptions, OtelConfig, Logger
+
+logger = Logger("orchestrator")
 
 VERSION = "0.1.0"
 WS_URL = os.environ.get("III_WS_URL", "ws://localhost:49134")
@@ -42,8 +44,11 @@ class StateKV:
     async def get(self, scope, key):
         try:
             return await self.sdk.trigger("state::get", {"scope": scope, "key": key})
-        except Exception:
+        except KeyError:
             return None
+        except Exception:
+            logger.error("state::get failed for %s:%s", scope, key, exc_info=True)
+            raise
 
     async def set(self, scope, key, value):
         await self.sdk.trigger("state::set", {"scope": scope, "key": key, "value": value})
@@ -51,8 +56,11 @@ class StateKV:
     async def list(self, scope):
         try:
             return await self.sdk.trigger("state::list", {"scope": scope})
-        except Exception:
+        except KeyError:
             return []
+        except Exception:
+            logger.error("state::list failed for %s", scope, exc_info=True)
+            raise
 
     async def delete(self, scope, key):
         await self.sdk.trigger("state::delete", {"scope": scope, "key": key})
@@ -165,6 +173,8 @@ def register_experiment_functions(sdk, kv):
 
         await kv.delete(SCOPES["crashes"], exp["tag"])
 
+        sdk.trigger_void("experiment.completed", {"tag": exp["tag"], "experiment_id": exp["id"]})
+
         return {
             "experiment_id": exp["id"],
             "status": exp["status"],
@@ -194,6 +204,8 @@ def register_experiment_functions(sdk, kv):
         if tag:
             tag["total_experiments"] += 1
             await kv.set(SCOPES["tags"], exp["tag"], tag)
+
+        sdk.trigger_void("experiment.crashed", {"tag": exp["tag"], "experiment_id": exp["id"]})
 
         return {
             "experiment_id": exp["id"],
@@ -354,6 +366,8 @@ def _build_suggestions(mode, underexplored, high_yield, near_misses, trend):
 
 
 def register_pool_functions(sdk, kv):
+    acquire_lock = asyncio.Lock()
+
     @sdk.register_function({"id": "pool::register_gpu", "description": "Register a GPU worker in the pool."})
     async def register_gpu(input):
         worker = {
@@ -399,14 +413,15 @@ def register_pool_functions(sdk, kv):
 
     @sdk.register_function({"id": "pool::acquire", "description": "Acquire an idle GPU for an experiment."})
     async def acquire(input):
-        workers = await kv.list(SCOPES["gpu_pool"])
-        idle = next((w for w in workers if w["status"] == "idle"), None)
-        if not idle:
-            return {"acquired": False, "gpu_id": None, "reason": "no idle GPUs"}
-        idle["status"] = "training"
-        idle["current_experiment_id"] = input["experiment_id"]
-        await kv.set(SCOPES["gpu_pool"], idle["id"], idle)
-        return {"acquired": True, "gpu_id": idle["id"], "gpu_index": idle["gpu_index"]}
+        async with acquire_lock:
+            workers = await kv.list(SCOPES["gpu_pool"])
+            idle = next((w for w in workers if w["status"] == "idle"), None)
+            if not idle:
+                return {"acquired": False, "gpu_id": None, "reason": "no idle GPUs"}
+            idle["status"] = "training"
+            idle["current_experiment_id"] = input["experiment_id"]
+            await kv.set(SCOPES["gpu_pool"], idle["id"], idle)
+            return {"acquired": True, "gpu_id": idle["id"], "gpu_index": idle["gpu_index"]}
 
     @sdk.register_function({"id": "pool::release", "description": "Release a GPU back to idle."})
     async def release(input):

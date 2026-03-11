@@ -38,7 +38,7 @@ Requirements: NVIDIA GPU(s), Python 3.10+, uv, Rust 1.82+.
     iii --config iii-config.yaml
 
     # 5. Start orchestrator (new terminal)
-    python workers/orchestrator/orchestrator.py
+    uv run python workers/orchestrator/orchestrator.py
 
     # 6. Start GPU worker (new terminal, one per GPU)
     cd workers/gpu
