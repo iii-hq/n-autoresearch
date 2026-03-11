@@ -1,0 +1,22 @@
+{
+  "name": "n-autoresearch",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Autonomous ML research infrastructure on iii-engine",
+  "license": "MIT",
+  "workspaces": [
+    "workers/orchestrator"
+  ],
+  "scripts": {
+    "build": "npm run build --workspace=workers/orchestrator",
+    "dev:orchestrator": "npm run dev --workspace=workers/orchestrator",
+    "dev:gpu": "cd workers/gpu && cargo run --release",
+    "dev": "concurrently \"npm run dev:orchestrator\" \"npm run dev:gpu\"",
+    "prepare:data": "uv run prepare.py",
+    "train": "uv run train.py"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.0",
+    "typescript": "^5.8.0"
+  }
+}
