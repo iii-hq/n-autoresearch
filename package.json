@@ -10,7 +10,6 @@
   "scripts": {
     "build": "npm run build --workspace=workers/orchestrator",
     "dev:orchestrator": "npm run dev --workspace=workers/orchestrator",
-    "dev:orchestrator-py": "python workers/orchestrator-py/orchestrator.py",
     "dev:gpu": "cd workers/gpu && cargo run --release",
     "dev": "concurrently \"npm run dev:orchestrator\" \"npm run dev:gpu\"",
     "prepare:data": "uv run prepare.py",
