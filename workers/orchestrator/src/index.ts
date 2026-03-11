@@ -1,4 +1,4 @@
-import { init } from "iii-sdk";
+import { registerWorker } from "iii-sdk";
 import { CONFIG } from "./config.js";
 import { StateKV } from "./state/kv.js";
 import { registerExperimentFunctions } from "./functions/experiment.js";
@@ -9,7 +9,7 @@ import { registerApiTriggers } from "./triggers/api.js";
 import { registerEventTriggers } from "./triggers/events.js";
 import { registerCronTriggers } from "./triggers/cron.js";
 
-const sdk = init(CONFIG.WS_URL, {
+const sdk = registerWorker(CONFIG.WS_URL, {
   workerName: CONFIG.WORKER_NAME,
   otel: {
     enabled: true,

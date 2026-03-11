@@ -1,5 +1,5 @@
 type SDK = {
-  trigger<O>(fn: string, input: unknown, timeout?: number): Promise<O>;
+  trigger<I, O>(fn: string, input: I, timeout?: number): Promise<O>;
 };
 
 export class StateKV {
@@ -7,32 +7,34 @@ export class StateKV {
 
   async get<T>(scope: string, key: string): Promise<T | null> {
     try {
-      const result = await this.sdk.trigger<{ value: T | null }>(
+      return await this.sdk.trigger<{ scope: string; key: string }, T | null>(
         "state::get", { scope, key }
       );
-      return result?.value ?? null;
     } catch {
       return null;
     }
   }
 
   async set<T>(scope: string, key: string, data: T): Promise<void> {
-    await this.sdk.trigger("state::set", { scope, key, value: data });
+    await this.sdk.trigger<{ scope: string; key: string; data: T }, T>(
+      "state::set", { scope, key, data }
+    );
   }
 
   async list<T>(scope: string): Promise<T[]> {
     try {
-      const result = await this.sdk.trigger<{ items: T[] }>(
+      return await this.sdk.trigger<{ scope: string }, T[]>(
         "state::list", { scope }
       );
-      return result?.items ?? [];
     } catch {
       return [];
     }
   }
 
   async delete(scope: string, key: string): Promise<void> {
-    await this.sdk.trigger("state::delete", { scope, key });
+    await this.sdk.trigger<{ scope: string; key: string }, void>(
+      "state::delete", { scope, key }
+    );
   }
 
   async count(scope: string): Promise<number> {
