@@ -1,7 +1,7 @@
 type SDK = {
   registerTrigger(config: {
     trigger_type: string;
-    function_path: string;
+    function_id: string;
     config: Record<string, unknown>;
   }): void;
 };
@@ -40,7 +40,7 @@ export function registerApiTriggers(sdk: SDK) {
   for (const t of httpTriggers) {
     sdk.registerTrigger({
       trigger_type: "http",
-      function_path: t.fn,
+      function_id: t.fn,
       config: { api_path: t.path, http_method: t.method },
     });
   }

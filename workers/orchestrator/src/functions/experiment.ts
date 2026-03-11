@@ -15,7 +15,7 @@ type SDK = {
     opts: { id: string; description: string },
     handler: (input: any) => Promise<any>
   ): void;
-  invokeFunction<I, O>(fn: string, input: I, timeout?: number): Promise<O>;
+  trigger<O>(fn: string, input: unknown, timeout?: number): Promise<O>;
 };
 
 export function registerExperimentFunctions(sdk: SDK, kv: StateKV) {
