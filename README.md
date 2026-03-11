@@ -25,7 +25,7 @@ Everything else stays the same. train.py is the only file agents modify. prepare
 Requirements: NVIDIA GPU(s), Python 3.10+, uv, Node.js 20+, Rust 1.82+.
 
     # 1. Install iii-engine
-    curl -fsSL https://raw.githubusercontent.com/iii-hq/iii/main/install.sh | sh
+    curl -fsSL https://install.iii.dev | sh
 
     # 2. Clone
     git clone https://github.com/iii-hq/n-autoresearch.git
