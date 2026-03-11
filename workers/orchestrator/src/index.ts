@@ -42,4 +42,4 @@ process.on("SIGTERM", shutdown);
 console.log(`n-autoresearch orchestrator v${CONFIG.VERSION}`);
 console.log(`Connected to iii-engine at ${CONFIG.WS_URL}`);
 console.log(`REST API at http://localhost:${CONFIG.REST_PORT}`);
-console.log("Functions: 18 | Triggers: 22 | Ready.");
+console.log("Functions: 21 | Triggers: 23 | Ready.");
