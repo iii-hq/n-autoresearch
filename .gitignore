@@ -12,3 +12,4 @@ target/
 .uv/
 uv.lock
 workers/orchestrator/dist/
+package-lock.json
