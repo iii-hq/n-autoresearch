@@ -66,6 +66,14 @@ class StateKV:
         await self.sdk.trigger("state::delete", {"scope": scope, "key": key})
 
 
+_tag_locks = {}
+
+def _tag_lock(tag):
+    if tag not in _tag_locks:
+        _tag_locks[tag] = asyncio.Lock()
+    return _tag_locks[tag]
+
+
 def register_experiment_functions(sdk, kv):
     @sdk.register_function({"id": "experiment::setup", "description": "Initialize a new experiment run tag."})
     async def setup(input):
@@ -123,9 +131,10 @@ def register_experiment_functions(sdk, kv):
         }
         await kv.set(SCOPES["experiments"], eid, experiment)
 
-        lineage = await kv.get(SCOPES["lineage"], input["tag"]) or []
-        lineage.append(eid)
-        await kv.set(SCOPES["lineage"], input["tag"], lineage)
+        async with _tag_lock(input["tag"]):
+            lineage = await kv.get(SCOPES["lineage"], input["tag"]) or []
+            lineage.append(eid)
+            await kv.set(SCOPES["lineage"], input["tag"], lineage)
 
         return {"experiment_id": eid, "status": "registered"}
 
@@ -135,45 +144,47 @@ def register_experiment_functions(sdk, kv):
         if not exp:
             return {"error": f"Experiment {input['experiment_id']} not found"}
 
-        best = await kv.get(SCOPES["best"], exp["tag"])
-        improved = not best or input["val_bpb"] < best["val_bpb"]
-        delta = best["val_bpb"] - input["val_bpb"] if best else 0
+        async with _tag_lock(exp["tag"]):
+            best = await kv.get(SCOPES["best"], exp["tag"])
+            improved = not best or input["val_bpb"] < best["val_bpb"]
+            delta = best["val_bpb"] - input["val_bpb"] if best else 0
 
-        for field in ["val_bpb", "peak_vram_mb", "training_seconds", "total_tokens_m", "mfu_percent", "num_steps", "num_params_m", "depth"]:
-            exp[field] = input[field]
-        exp["status"] = "keep" if improved else "discard"
-        exp["finished_at"] = datetime.now(timezone.utc).isoformat()
-        await kv.set(SCOPES["experiments"], exp["id"], exp)
+            for field in ["val_bpb", "peak_vram_mb", "training_seconds", "total_tokens_m", "mfu_percent", "num_steps", "num_params_m", "depth"]:
+                exp[field] = input[field]
+            exp["status"] = "keep" if improved else "discard"
+            exp["finished_at"] = datetime.now(timezone.utc).isoformat()
+            await kv.set(SCOPES["experiments"], exp["id"], exp)
 
-        if improved:
-            await kv.set(SCOPES["best"], exp["tag"], {
-                "experiment_id": exp["id"],
-                "val_bpb": input["val_bpb"],
-                "commit_sha": exp["commit_sha"],
-                "updated_at": datetime.now(timezone.utc).isoformat(),
-            })
-
-        if not improved and best and delta > -NEAR_MISS_THRESHOLD:
-            await kv.set(SCOPES["near_misses"], exp["id"], {
-                "experiment_id": exp["id"],
-                "val_bpb": input["val_bpb"],
-                "delta": abs(delta),
-                "hypothesis": exp["hypothesis"],
-                "category": exp["category"],
-                "diff_summary": exp["diff_summary"],
-            })
-
-        tag = await kv.get(SCOPES["tags"], exp["tag"])
-        if tag:
-            tag["total_experiments"] += 1
             if improved:
-                tag["kept_experiments"] += 1
-                tag["best_val_bpb"] = input["val_bpb"]
-            await kv.set(SCOPES["tags"], exp["tag"], tag)
+                await kv.set(SCOPES["best"], exp["tag"], {
+                    "experiment_id": exp["id"],
+                    "val_bpb": input["val_bpb"],
+                    "commit_sha": exp["commit_sha"],
+                    "updated_at": datetime.now(timezone.utc).isoformat(),
+                })
 
-        await kv.delete(SCOPES["crashes"], exp["tag"])
+            if not improved and best and delta > -NEAR_MISS_THRESHOLD:
+                await kv.set(SCOPES["near_misses"], exp["id"], {
+                    "experiment_id": exp["id"],
+                    "tag": exp["tag"],
+                    "val_bpb": input["val_bpb"],
+                    "delta": abs(delta),
+                    "hypothesis": exp["hypothesis"],
+                    "category": exp["category"],
+                    "diff_summary": exp["diff_summary"],
+                })
 
-        sdk.trigger_void("experiment.completed", {"tag": exp["tag"], "experiment_id": exp["id"]})
+            tag = await kv.get(SCOPES["tags"], exp["tag"])
+            if tag:
+                tag["total_experiments"] += 1
+                if improved:
+                    tag["kept_experiments"] += 1
+                    tag["best_val_bpb"] = input["val_bpb"]
+                await kv.set(SCOPES["tags"], exp["tag"], tag)
+
+            await kv.delete(SCOPES["crashes"], exp["tag"])
+
+        sdk.trigger_void("search::adapt", {"tag": exp["tag"]})
 
         return {
             "experiment_id": exp["id"],
@@ -196,16 +207,17 @@ def register_experiment_functions(sdk, kv):
         exp["finished_at"] = datetime.now(timezone.utc).isoformat()
         await kv.set(SCOPES["experiments"], exp["id"], exp)
 
-        crashes = await kv.get(SCOPES["crashes"], exp["tag"]) or 0
-        consecutive = crashes + 1
-        await kv.set(SCOPES["crashes"], exp["tag"], consecutive)
+        async with _tag_lock(exp["tag"]):
+            crashes = await kv.get(SCOPES["crashes"], exp["tag"]) or 0
+            consecutive = crashes + 1
+            await kv.set(SCOPES["crashes"], exp["tag"], consecutive)
 
-        tag = await kv.get(SCOPES["tags"], exp["tag"])
-        if tag:
-            tag["total_experiments"] += 1
-            await kv.set(SCOPES["tags"], exp["tag"], tag)
+            tag = await kv.get(SCOPES["tags"], exp["tag"])
+            if tag:
+                tag["total_experiments"] += 1
+                await kv.set(SCOPES["tags"], exp["tag"], tag)
 
-        sdk.trigger_void("experiment.crashed", {"tag": exp["tag"], "experiment_id": exp["id"]})
+        sdk.trigger_void("search::adapt", {"tag": exp["tag"]})
 
         return {
             "experiment_id": exp["id"],
@@ -237,7 +249,8 @@ def register_experiment_functions(sdk, kv):
     @sdk.register_function({"id": "experiment::near_misses", "description": "Get near-miss experiments."})
     async def near_misses(input):
         all_nm = await kv.list(SCOPES["near_misses"])
-        filtered = sorted(all_nm, key=lambda n: n.get("delta", 0))
+        tag_nm = [n for n in all_nm if n.get("tag") == input["tag"]]
+        filtered = sorted(tag_nm, key=lambda n: n.get("delta", 0))
         limit = input.get("limit", 20)
         return {"near_misses": filtered[:limit], "total": len(filtered)}
 
@@ -271,7 +284,8 @@ def register_search_functions(sdk, kv):
         recent = tag_exps[-10:]
         keep_rate = sum(1 for e in recent if e.get("status") == "keep") / len(recent)
         crash_rate = sum(1 for e in recent if e.get("status") == "crash") / len(recent)
-        near_misses = await kv.list(SCOPES["near_misses"])
+        all_nm = await kv.list(SCOPES["near_misses"])
+        near_misses = [n for n in all_nm if n.get("tag") == input["tag"]]
 
         if crash_rate > 0.5:
             mode, temperature = "exploit", 0.3
@@ -309,7 +323,8 @@ def register_search_functions(sdk, kv):
         )
 
         strategy = await kv.get(SCOPES["strategy"], input["tag"])
-        near_misses = await kv.list(SCOPES["near_misses"])
+        all_nm = await kv.list(SCOPES["near_misses"])
+        near_misses = [n for n in all_nm if n.get("tag") == input["tag"]]
 
         category_counts = {}
         for exp in tag_exps:
@@ -390,6 +405,8 @@ def register_pool_functions(sdk, kv):
         if not worker:
             return {"error": "GPU worker not found"}
         worker["last_heartbeat"] = datetime.now(timezone.utc).isoformat()
+        if worker["status"] == "offline":
+            worker["status"] = "training" if worker.get("current_experiment_id") else "idle"
         await kv.set(SCOPES["gpu_pool"], input["gpu_id"], worker)
         return {"ok": True}
 
@@ -428,6 +445,8 @@ def register_pool_functions(sdk, kv):
         worker = await kv.get(SCOPES["gpu_pool"], input["gpu_id"])
         if not worker:
             return {"error": "GPU worker not found"}
+        if worker.get("current_experiment_id") != input.get("experiment_id"):
+            return {"error": "experiment_id mismatch or GPU not leased by caller"}
         worker["status"] = "idle"
         worker["current_experiment_id"] = None
         await kv.set(SCOPES["gpu_pool"], input["gpu_id"], worker)
@@ -560,16 +579,6 @@ def register_triggers(sdk):
         })
 
     sdk.register_trigger({
-        "trigger_type": "queue",
-        "function_id": "search::adapt",
-        "config": {"topic": "experiment.completed"},
-    })
-    sdk.register_trigger({
-        "trigger_type": "queue",
-        "function_id": "search::adapt",
-        "config": {"topic": "experiment.crashed"},
-    })
-    sdk.register_trigger({
         "trigger_type": "cron",
         "function_id": "pool::list",
         "config": {"expression": "*/30 * * * * *"},
@@ -598,7 +607,7 @@ def main():
     print(f"n-autoresearch orchestrator v{VERSION}")
     print(f"Connected to iii-engine at {WS_URL}")
     print(f"REST API at http://localhost:{os.environ.get('III_REST_PORT', '3111')}")
-    print("Functions: 21 | Triggers: 23 | Ready.")
+    print("Functions: 21 | Triggers: 21 | Ready.")
 
     loop = asyncio.get_event_loop()
     stop = asyncio.Event()
