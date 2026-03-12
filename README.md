@@ -144,6 +144,25 @@ N GPU workers = N parallel experiments on the same tag. Each agent acquires a GP
 
     curl -X POST localhost:3111/api/pool/release -d '{"gpu_id":"gpu-3"}'
 
+### Cross-machine GPU workers
+
+Yes — GPU workers on different machines can point to the same orchestrator running on a CPU-only machine. The orchestrator and iii-engine share state via KV, and GPU workers communicate over WebSocket.
+
+On the CPU machine (orchestrator):
+
+    iii --config iii-config.yaml
+    uv run python workers/orchestrator/orchestrator.py
+
+On each GPU machine:
+
+    cd workers/gpu
+    III_WS_URL=ws://<orchestrator-ip>:49134 GPU_INDEX=0 REPO_DIR=/path/to/n-autoresearch cargo run --release
+
+Requirements:
+- Port 49134 (WebSocket) and 3111 (REST API) must be reachable from GPU machines
+- Each GPU machine needs a local clone of the repo with `prepare.py` already run (data files present)
+- The `REPO_DIR` env var must point to the local clone on each GPU machine
+
 ## Project structure
 
     iii-config.yaml                         iii-engine runtime config
