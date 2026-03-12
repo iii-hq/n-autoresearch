@@ -146,7 +146,7 @@ N GPU workers = N parallel experiments on the same tag. Each agent acquires a GP
 
 ### Cross-machine GPU workers
 
-Yes — GPU workers on different machines can point to the same orchestrator running on a CPU-only machine. The orchestrator and iii-engine share state via KV, and GPU workers communicate over WebSocket.
+GPU workers on different machines can point to the same orchestrator running on a CPU-only machine. The orchestrator and iii-engine share state via KV, and GPU workers communicate over WebSocket.
 
 On the CPU machine (orchestrator):
 
