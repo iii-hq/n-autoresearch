@@ -46,8 +46,8 @@ class StateKV:
             return await self.sdk.trigger("state::get", {"scope": scope, "key": key})
         except KeyError:
             return None
-        except Exception:
-            logger.error("state::get failed", {"scope": scope, "key": key})
+        except Exception as e:
+            logger.error("state::get failed", {"scope": scope, "key": key, "error": str(e)})
             raise
 
     async def set(self, scope, key, value):
@@ -58,8 +58,8 @@ class StateKV:
             return await self.sdk.trigger("state::list", {"scope": scope})
         except KeyError:
             return []
-        except Exception:
-            logger.error("state::list failed", {"scope": scope})
+        except Exception as e:
+            logger.error("state::list failed", {"scope": scope, "error": str(e)})
             raise
 
     async def delete(self, scope, key):
@@ -469,10 +469,12 @@ def register_pool_functions(sdk, kv):
 
     async def release(data):
         input = _unwrap_input(data)
+        if not input.get("experiment_id"):
+            return _err({"error": "experiment_id is required"})
         worker = await kv.get(SCOPES["gpu_pool"], input["gpu_id"])
         if not worker:
             return _err({"error": "GPU worker not found"}, 404)
-        if worker.get("current_experiment_id") != input.get("experiment_id"):
+        if not worker.get("current_experiment_id") or worker["current_experiment_id"] != input["experiment_id"]:
             return _err({"error": "experiment_id mismatch or GPU not leased by caller"})
         worker["status"] = "idle"
         worker["current_experiment_id"] = None
@@ -647,12 +649,13 @@ async def main():
 
     stop = asyncio.Event()
 
-    def shutdown(*_):
+    def shutdown():
         logger.info("shutting down")
         stop.set()
 
-    signal.signal(signal.SIGINT, shutdown)
-    signal.signal(signal.SIGTERM, shutdown)
+    loop = asyncio.get_running_loop()
+    loop.add_signal_handler(signal.SIGINT, shutdown)
+    loop.add_signal_handler(signal.SIGTERM, shutdown)
 
     await stop.wait()
     await sdk.shutdown()
