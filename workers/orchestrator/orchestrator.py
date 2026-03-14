@@ -497,16 +497,10 @@ def register_pool_functions(sdk, kv):
         return _ok({"deregistered": True})
 
     async def gpu_health(data):
-        input = _unwrap_input(data)
-        gpu_id = input.get("gpu_id")
+        inp = _unwrap_input(data)
+        gpu_id = inp.get("gpu_id")
         if not gpu_id:
-            workers = await kv.list(SCOPES["gpu_pool"])
-            for w in workers:
-                w["last_heartbeat"] = datetime.now(timezone.utc).isoformat()
-                if w["status"] == "offline":
-                    w["status"] = "training" if w.get("current_experiment_id") else "idle"
-                await kv.set(SCOPES["gpu_pool"], w["id"], w)
-            return _ok({"ok": True, "refreshed": len(workers)})
+            return _err({"error": "gpu_id is required"})
         worker = await kv.get(SCOPES["gpu_pool"], gpu_id)
         if not worker:
             return _err({"error": "GPU worker not found"}, 404)
@@ -648,7 +642,6 @@ def register_triggers(sdk):
         sdk.register_trigger("http", fn, {"api_path": path, "http_method": method})
 
     sdk.register_trigger("cron", "pool::list", {"expression": "*/30 * * * * *"})
-    sdk.register_trigger("cron", "gpu::health", {"expression": "*/20 * * * * *"})
 
 
 async def main():
@@ -677,7 +670,7 @@ async def main():
         "ws_url": WS_URL,
         "rest_url": f"http://localhost:{rest_port}",
         "functions": 22,
-        "triggers": 23,
+        "triggers": 22,
     })
 
     stop = asyncio.Event()
