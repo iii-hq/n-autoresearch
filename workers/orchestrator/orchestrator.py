@@ -1,4 +1,5 @@
 import os
+import json
 import time
 import asyncio
 import signal
@@ -77,6 +78,11 @@ def _tag_lock(tag):
 def _unwrap_input(data):
     if isinstance(data, dict) and "body" in data:
         data = data["body"]
+    if isinstance(data, str):
+        try:
+            data = json.loads(data)
+        except (json.JSONDecodeError, TypeError):
+            pass
     return data or {}
 
 
@@ -91,7 +97,9 @@ def _err(body, status=400):
 def register_experiment_functions(sdk, kv):
     async def setup(data):
         input = _unwrap_input(data)
-        tag = input["tag"]
+        tag = input.get("tag")
+        if not tag:
+            return _err({"error": "tag is required"})
         existing = await kv.get(SCOPES["tags"], tag)
         if existing:
             return _err({"error": f"Tag '{tag}' already exists", "existing": existing})
@@ -119,15 +127,17 @@ def register_experiment_functions(sdk, kv):
 
     async def register(data):
         input = _unwrap_input(data)
+        if not input.get("tag"):
+            return _err({"error": "tag is required"})
         eid = experiment_id()
         experiment = {
             "id": eid,
             "tag": input["tag"],
             "parent_id": input.get("parent_id"),
-            "commit_sha": input["commit_sha"],
-            "description": input["description"],
-            "hypothesis": input["hypothesis"],
-            "category": input["category"],
+            "commit_sha": input.get("commit_sha", "unknown"),
+            "description": input.get("description", ""),
+            "hypothesis": input.get("hypothesis", ""),
+            "category": input.get("category", "other"),
             "val_bpb": 0,
             "peak_vram_mb": 0,
             "training_seconds": 0,
@@ -140,7 +150,7 @@ def register_experiment_functions(sdk, kv):
             "gpu_id": input.get("gpu_id", "gpu-0"),
             "started_at": datetime.now(timezone.utc).isoformat(),
             "finished_at": None,
-            "diff_summary": input["diff_summary"],
+            "diff_summary": input.get("diff_summary", ""),
             "error": None,
         }
         await kv.set(SCOPES["experiments"], eid, experiment)
@@ -486,12 +496,27 @@ def register_pool_functions(sdk, kv):
         await kv.delete(SCOPES["gpu_pool"], input["gpu_id"])
         return _ok({"deregistered": True})
 
+    async def gpu_health(data):
+        inp = _unwrap_input(data)
+        gpu_id = inp.get("gpu_id")
+        if not gpu_id:
+            return _err({"error": "gpu_id is required"})
+        worker = await kv.get(SCOPES["gpu_pool"], gpu_id)
+        if not worker:
+            return _err({"error": "GPU worker not found"}, 404)
+        worker["last_heartbeat"] = datetime.now(timezone.utc).isoformat()
+        if worker["status"] == "offline":
+            worker["status"] = "training" if worker.get("current_experiment_id") else "idle"
+        await kv.set(SCOPES["gpu_pool"], gpu_id, worker)
+        return _ok({"ok": True})
+
     sdk.register_function("pool::register_gpu", register_gpu, description="Register a GPU worker in the pool.")
     sdk.register_function("pool::heartbeat", heartbeat, description="GPU worker heartbeat.")
     sdk.register_function("pool::list", list_gpus, description="List all GPU workers.")
     sdk.register_function("pool::acquire", acquire, description="Acquire an idle GPU for an experiment.")
     sdk.register_function("pool::release", release, description="Release a GPU back to idle.")
     sdk.register_function("pool::deregister", deregister, description="Remove a GPU worker from the pool.")
+    sdk.register_function("gpu::health", gpu_health, description="GPU health check — keeps workers from going offline.")
 
 
 def register_report_functions(sdk, kv):
@@ -611,6 +636,7 @@ def register_triggers(sdk):
         ("/api/report/tsv", "POST", "report::tsv"),
         ("/api/report/diff", "POST", "report::diff"),
         ("/api/report/tags", "GET", "report::tags"),
+        ("/api/gpu/health", "POST", "gpu::health"),
     ]
     for path, method, fn in http_triggers:
         sdk.register_trigger("http", fn, {"api_path": path, "http_method": method})
@@ -643,8 +669,8 @@ async def main():
         "version": VERSION,
         "ws_url": WS_URL,
         "rest_url": f"http://localhost:{rest_port}",
-        "functions": 21,
-        "triggers": 21,
+        "functions": 22,
+        "triggers": 22,
     })
 
     stop = asyncio.Event()
