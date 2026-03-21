@@ -16,16 +16,16 @@ The repo has three files that matter, same as autoresearch:
 
 Two workers talk to iii to provide the infrastructure:
 
-- **Orchestrator** (Python) — 22 functions for experiment tracking, search strategy, GPU pool, reporting.
+- **Orchestrator** (Python) — 27 functions for experiment tracking, search strategy, guidance memory, GPU pool, reporting.
 - **GPU Worker** (Rust) — one per GPU, executes `uv run train.py`, parses metrics, handles timeouts.
 
 The agent calls the same `uv run train.py` but wraps it with REST API calls:
 
 ```
-POST /api/experiment/setup      — init run tag
+POST /api/guidance/brief        — get full briefing before starting (memory + state + strategy)
 POST /api/experiment/register   — record hypothesis before training
 POST /api/experiment/complete   — record metrics, auto keep/discard
-POST /api/search/suggest        — get guidance on what to try next
+POST /api/guidance/record       — record an insight the agent discovered
 POST /api/report/summary        — full stats for a run tag
 ```
 
@@ -75,7 +75,7 @@ The agent loop:
 
 ```
 1. POST /api/experiment/setup          — init run tag
-2. POST /api/search/suggest            — get search guidance
+2. POST /api/guidance/brief            — get briefing (memory + strategy + warnings)
 3. edit train.py                       — the experiment
 4. git commit
 5. POST /api/experiment/register       — record hypothesis
@@ -131,6 +131,42 @@ keep rate > 30%                     -> exploit
 default                             -> explore
 ```
 
+## Guidance agent
+
+Long-running experiment loops get stuck in local optima. The agent keeps refining a narrow approach instead of stepping back and trying something better. Guidance solves this with persistent cross-session memory.
+
+```bash
+curl -X POST localhost:3111/api/guidance/brief -d '{"tag":"run-001"}'
+{
+  "best": { "val_bpb": 1.0412 },
+  "strategy": "exploit",
+  "guidance": {
+    "dead_ends": ["attention changes never improved BPB across 8 attempts"],
+    "high_yield": ["optimizer changes are productive (5/9 kept)"],
+    "warnings": ["OOM crashes observed — models above ~124M params may not fit"],
+    "observations": ["BPB plateau detected: last 4 improvements within 0.001"]
+  }
+}
+```
+
+How it works:
+- `guidance::synthesize` runs automatically every 5 experiments, extracting patterns from history
+- The agent can also manually record insights via `guidance::record`
+- Before each experiment, the agent calls `guidance::brief` to get a full briefing
+- Dead ends, hardware limits, and crash patterns persist across sessions
+
+Insight types:
+
+```
+dead_end         category that never improves (>= 5 attempts, 0 kept)
+high_yield       category with > 40% keep rate
+unstable         category that crashes > 50% of the time
+recurring_crash  same error message appears 2+ times
+hardware_limit   OOM pattern with param count threshold
+plateau          recent improvements within 0.001 BPB
+observation      manually recorded by the agent
+```
+
 ## Project structure
 
 ```
@@ -140,7 +176,7 @@ program.md                              agent instructions
 iii-config.yaml                         iii runtime config
 workers/
   orchestrator/
-    orchestrator.py                     Python worker — 22 functions, 22 triggers
+    orchestrator.py                     Python worker — 27 functions, 27 triggers
   gpu/                                  Rust worker (one per GPU)
     src/
       main.rs                           init, GPU detection, pool registration
@@ -150,7 +186,7 @@ workers/
       triggers/mod.rs                   HTTP + cron triggers
 ```
 
-## Functions (22)
+## Functions (27)
 
 ```
 experiment::setup           init tag + branch + strategy
@@ -165,6 +201,12 @@ search::strategy            get current mode (explore/exploit/combine/ablation)
 search::set_strategy        manual override
 search::adapt               auto-adapt from experiment history
 search::suggest_direction   category stats, underexplored areas, concrete suggestions
+
+guidance::synthesize        auto-extract patterns from experiment history into memory
+guidance::memory            read accumulated insights for a tag
+guidance::record            agent records an insight (dead end, observation, hardware limit)
+guidance::delete            remove an outdated insight by index
+guidance::brief             full briefing: memory + current best + strategy + recent experiments
 
 pool::register_gpu          GPU worker self-registers on startup
 pool::heartbeat             30s heartbeat, offline after 60s stale
@@ -186,6 +228,7 @@ report::tags                list all run tags
 - **Structured state.** Experiments, lineage, GPU pool, search strategy all live in iii KV. Queryable, exportable, survives crashes.
 - **Multi-GPU native.** N GPUs = N parallel experiments. Atomic GPU acquisition prevents conflicts. Strategy adapts globally.
 - **TSV compatibility.** `report::tsv` exports in the original autoresearch format for backwards compatibility.
+- **Guidance memory.** Persistent cross-session insights prevent agents from repeating dead ends and help them focus on productive categories.
 
 ## Platform notes
 

@@ -23,6 +23,7 @@ SCOPES = {
     "strategy": "strategy",
     "tags": "tags",
     "crashes": "crashes",
+    "guidance": "guidance",
 }
 
 ALL_CATEGORIES = [
@@ -225,6 +226,10 @@ def register_experiment_functions(sdk, kv):
             await kv.delete(SCOPES["crashes"], exp["tag"])
 
         await _trigger_void(sdk, "search::adapt", {"tag": exp["tag"]})
+
+        tag_obj = await kv.get(SCOPES["tags"], exp["tag"])
+        if tag_obj and tag_obj.get("total_experiments", 0) % 5 == 0:
+            await _trigger_void(sdk, "guidance::synthesize", {"tag": exp["tag"]})
 
         return _ok({
             "experiment_id": exp["id"],
@@ -431,6 +436,217 @@ def _build_suggestions(mode, underexplored, high_yield, near_misses, trend):
     if len(trend) >= 3 and trend[-1] >= trend[0]:
         suggestions.append("BPB trend is flat/worsening. Consider a strategy change.")
     return suggestions
+
+
+def register_guidance_functions(sdk, kv):
+    async def synthesize(data):
+        input = _unwrap_input(data)
+        tag = input["tag"]
+        all_exps = await kv.list(SCOPES["experiments"])
+        tag_exps = [e for e in all_exps if e.get("tag") == tag and e.get("status") != "running"]
+
+        if len(tag_exps) < 5:
+            return _ok({"synthesized": 0, "reason": "too few experiments to synthesize"})
+
+        insights = []
+        now = datetime.now(timezone.utc).isoformat()
+
+        cat_stats = {}
+        for e in tag_exps:
+            cat = e.get("category", "other")
+            if cat not in cat_stats:
+                cat_stats[cat] = {"total": 0, "kept": 0, "crashed": 0, "avg_bpb": []}
+            cat_stats[cat]["total"] += 1
+            if e.get("status") == "keep":
+                cat_stats[cat]["kept"] += 1
+            if e.get("status") == "crash":
+                cat_stats[cat]["crashed"] += 1
+            if e.get("val_bpb") and e["status"] != "crash":
+                cat_stats[cat]["avg_bpb"].append(e["val_bpb"])
+
+        for cat, stats in cat_stats.items():
+            if stats["total"] >= 3:
+                keep_rate = stats["kept"] / stats["total"]
+                crash_rate = stats["crashed"] / stats["total"]
+
+                if keep_rate == 0 and stats["total"] >= 5:
+                    insights.append({
+                        "type": "dead_end",
+                        "category": cat,
+                        "insight": f"{cat} changes never improved BPB across {stats['total']} attempts",
+                        "confidence": min(0.5 + stats["total"] * 0.05, 0.95),
+                    })
+                elif crash_rate > 0.5:
+                    insights.append({
+                        "type": "unstable",
+                        "category": cat,
+                        "insight": f"{cat} changes crash >50% of the time ({stats['crashed']}/{stats['total']})",
+                        "confidence": min(0.5 + stats["total"] * 0.05, 0.95),
+                    })
+                elif keep_rate > 0.4:
+                    insights.append({
+                        "type": "high_yield",
+                        "category": cat,
+                        "insight": f"{cat} changes are productive ({stats['kept']}/{stats['total']} kept)",
+                        "confidence": min(0.5 + stats["total"] * 0.05, 0.95),
+                    })
+
+        crash_exps = [e for e in tag_exps if e.get("status") == "crash"]
+        if crash_exps:
+            error_counts = {}
+            for e in crash_exps:
+                err = (e.get("error") or "unknown")[:100]
+                error_counts[err] = error_counts.get(err, 0) + 1
+            for err, count in error_counts.items():
+                if count >= 2:
+                    insights.append({
+                        "type": "recurring_crash",
+                        "category": "crash_pattern",
+                        "insight": f"Recurring crash ({count}x): {err}",
+                        "confidence": min(0.6 + count * 0.1, 0.95),
+                    })
+
+        kept = [e for e in tag_exps if e.get("status") == "keep"]
+        if len(kept) >= 3:
+            recent_kept = kept[-5:]
+            bpb_values = [e["val_bpb"] for e in recent_kept]
+            if len(bpb_values) >= 3 and max(bpb_values) - min(bpb_values) < 0.001:
+                insights.append({
+                    "type": "plateau",
+                    "category": "trend",
+                    "insight": f"BPB plateau detected: last {len(bpb_values)} improvements within 0.001 of each other",
+                    "confidence": 0.8,
+                })
+
+        vram_exps = [e for e in crash_exps if "out of memory" in (e.get("error") or "").lower() or "oom" in (e.get("error") or "").lower()]
+        if vram_exps:
+            max_params = max((e.get("num_params_m", 0) for e in vram_exps), default=0)
+            if max_params > 0:
+                insights.append({
+                    "type": "hardware_limit",
+                    "category": "resource",
+                    "insight": f"OOM crashes observed — models above ~{max_params:.0f}M params may not fit",
+                    "confidence": 0.7,
+                })
+
+        existing = await kv.get(SCOPES["guidance"], tag) or {"insights": [], "last_synthesized": None}
+        existing_texts = {i["insight"] for i in existing["insights"]}
+        new_insights = []
+        for ins in insights:
+            if ins["insight"] not in existing_texts:
+                ins["created_at"] = now
+                ins["source"] = "auto"
+                new_insights.append(ins)
+
+        existing["insights"].extend(new_insights)
+        existing["last_synthesized"] = now
+        existing["total_experiments_analyzed"] = len(tag_exps)
+        await kv.set(SCOPES["guidance"], tag, existing)
+
+        return _ok({"synthesized": len(new_insights), "total_insights": len(existing["insights"])})
+
+    async def memory(data):
+        input = _unwrap_input(data)
+        tag = input["tag"]
+        mem = await kv.get(SCOPES["guidance"], tag)
+        if not mem:
+            return _ok({"insights": [], "total": 0, "last_synthesized": None})
+        insights = mem.get("insights", [])
+        if input.get("type"):
+            insights = [i for i in insights if i.get("type") == input["type"]]
+        return _ok({
+            "insights": insights,
+            "total": len(insights),
+            "last_synthesized": mem.get("last_synthesized"),
+            "total_experiments_analyzed": mem.get("total_experiments_analyzed", 0),
+        })
+
+    async def record(data):
+        input = _unwrap_input(data)
+        tag = input["tag"]
+        now = datetime.now(timezone.utc).isoformat()
+
+        insight = {
+            "type": input.get("type", "observation"),
+            "category": input.get("category", "general"),
+            "insight": input["insight"],
+            "confidence": input.get("confidence", 0.7),
+            "created_at": now,
+            "source": "agent",
+        }
+
+        mem = await kv.get(SCOPES["guidance"], tag) or {"insights": [], "last_synthesized": None}
+        mem["insights"].append(insight)
+        await kv.set(SCOPES["guidance"], tag, mem)
+
+        return _ok({"recorded": True, "total_insights": len(mem["insights"])})
+
+    async def delete_insight(data):
+        input = _unwrap_input(data)
+        tag = input["tag"]
+        index = input["index"]
+
+        mem = await kv.get(SCOPES["guidance"], tag)
+        if not mem or index >= len(mem.get("insights", [])):
+            return _err({"error": "Insight not found at index"})
+
+        removed = mem["insights"].pop(index)
+        await kv.set(SCOPES["guidance"], tag, mem)
+        return _ok({"deleted": True, "removed": removed["insight"], "remaining": len(mem["insights"])})
+
+    async def brief(data):
+        input = _unwrap_input(data)
+        tag = input["tag"]
+
+        tag_data = await kv.get(SCOPES["tags"], tag)
+        if not tag_data:
+            return _err({"error": f"Tag '{tag}' not found"}, 404)
+
+        best = await kv.get(SCOPES["best"], tag)
+        strategy = await kv.get(SCOPES["strategy"], tag)
+        mem = await kv.get(SCOPES["guidance"], tag) or {"insights": []}
+
+        all_exps = await kv.list(SCOPES["experiments"])
+        tag_exps = [e for e in all_exps if e.get("tag") == tag and e.get("status") != "running"]
+        recent = tag_exps[-5:] if tag_exps else []
+
+        all_nm = await kv.list(SCOPES["near_misses"])
+        near_misses = [n for n in all_nm if n.get("tag") == tag]
+
+        dead_ends = [i for i in mem["insights"] if i["type"] == "dead_end"]
+        high_yield = [i for i in mem["insights"] if i["type"] == "high_yield"]
+        warnings = [i for i in mem["insights"] if i["type"] in ("unstable", "recurring_crash", "hardware_limit")]
+        observations = [i for i in mem["insights"] if i["type"] in ("observation", "plateau")]
+
+        return _ok({
+            "tag": tag,
+            "total_experiments": tag_data["total_experiments"],
+            "kept_experiments": tag_data["kept_experiments"],
+            "best": {
+                "val_bpb": best["val_bpb"],
+                "commit": best["commit_sha"],
+                "experiment_id": best["experiment_id"],
+            } if best else None,
+            "strategy": strategy.get("mode", "explore") if strategy else "explore",
+            "recent_experiments": [
+                {"id": e["id"], "status": e["status"], "val_bpb": e.get("val_bpb"), "category": e.get("category"), "description": e.get("description")}
+                for e in recent
+            ],
+            "near_misses": len(near_misses),
+            "guidance": {
+                "dead_ends": [i["insight"] for i in dead_ends],
+                "high_yield": [i["insight"] for i in high_yield],
+                "warnings": [i["insight"] for i in warnings],
+                "observations": [i["insight"] for i in observations],
+                "total_insights": len(mem["insights"]),
+            },
+        })
+
+    _reg_fn(sdk, "guidance::synthesize", synthesize, "Auto-extract patterns from experiment history into memory.")
+    _reg_fn(sdk, "guidance::memory", memory, "Read accumulated guidance memory for a tag.")
+    _reg_fn(sdk, "guidance::record", record, "Manually record an insight into guidance memory.")
+    _reg_fn(sdk, "guidance::delete", delete_insight, "Delete an insight from guidance memory by index.")
+    _reg_fn(sdk, "guidance::brief", brief, "Full briefing for execution agent: memory + state + strategy + suggestions.")
 
 
 def register_pool_functions(sdk, kv):
@@ -643,6 +859,11 @@ def register_triggers(sdk):
         ("/api/search/set-strategy", "POST", "search::set_strategy"),
         ("/api/search/adapt", "POST", "search::adapt"),
         ("/api/search/suggest", "POST", "search::suggest_direction"),
+        ("/api/guidance/synthesize", "POST", "guidance::synthesize"),
+        ("/api/guidance/memory", "POST", "guidance::memory"),
+        ("/api/guidance/record", "POST", "guidance::record"),
+        ("/api/guidance/delete", "POST", "guidance::delete"),
+        ("/api/guidance/brief", "POST", "guidance::brief"),
         ("/api/pool/register", "POST", "pool::register_gpu"),
         ("/api/pool/heartbeat", "POST", "pool::heartbeat"),
         ("/api/pool/list", "GET", "pool::list"),
@@ -676,6 +897,7 @@ async def main():
 
     register_experiment_functions(sdk, kv)
     register_search_functions(sdk, kv)
+    register_guidance_functions(sdk, kv)
     register_pool_functions(sdk, kv)
     register_report_functions(sdk, kv)
     register_triggers(sdk)
@@ -685,8 +907,8 @@ async def main():
         "version": VERSION,
         "ws_url": WS_URL,
         "rest_url": f"http://localhost:{rest_port}",
-        "functions": 22,
-        "triggers": 22,
+        "functions": 27,
+        "triggers": 27,
     })
 
     stop = asyncio.Event()
